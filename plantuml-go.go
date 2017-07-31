@@ -3,7 +3,6 @@ package main
 import (
   "os"
   "bytes"
-  "compress/flate"
   "io/ioutil"
   "flag"
   "fmt"
@@ -11,6 +10,7 @@ import (
   "strings"
   "net/http"
   "io"
+  "compress/zlib"
 )
 const (
   FORMAT_TXT = "txt"
@@ -19,19 +19,20 @@ const (
   STYLE_TXT = "text"
   STYLE_LINK = "link"
   STYLE_OUTPUT = "output"
+  mapper = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
 )
 func main() {
   opts := parseArgs();
-  if(opts.InputStream != nil){
+  if opts.InputStream != nil {
     process(&opts, encodeAsTextFormat(opts.InputStream), "");
   }else{
     for _, filename := range opts.FileNames {
         data,err := ioutil.ReadFile(filename)
       if err != nil{
-        fmt.Errorf("Error: Unable to read file %s\n", filename);
-        os.Exit(1);
+        fmt.Println(err);
+        continue
       }
-	process(&opts,encodeAsTextFormat(data), filename);
+      process(&opts,encodeAsTextFormat(data), filename);
     }
   }
 }
@@ -42,22 +43,20 @@ func process(options *Options, textFormat string, filename string) {
     fmt.Printf("%s/%s/%s\n", options.Server, options.Format, textFormat)
   } else if options.Style == STYLE_OUTPUT {
     link := fmt.Sprintf("%s/%s/%s", options.Server, options.Format, textFormat)
-    var output *os.File;
+    output := os.Stdout
 
-    if filename == "" {
-	output = os.Stdout
-    }else{
+    if filename != "" {
       outputFilename := strings.TrimSuffix(filename, filepath.Ext(filename))
       outputFilename = fmt.Sprintf("%s.%s", outputFilename, options.Format)
       output, _ = os.OpenFile(outputFilename, os.O_RDWR|os.O_CREATE, 0666)
     }
     response, err := http.Get(link)
     if err != nil {
-	fmt.Errorf("Error Fetching: %s\n", link)
+	fmt.Println(err)
         return
     }
     if response.StatusCode != 200 {
-      fmt.Errorf("Error Fetch: %s\n%s\n", link, response.Status)
+      fmt.Println("Error in Fetching: %s\n%s\n", link, response.Status)
       return
     }
 
@@ -74,85 +73,65 @@ type Options struct {
   FileNames []string
 }
 
-func encodeAsTextFormat(input []byte) string{
-  return encode64(deflate(input));
+func encodeAsTextFormat(raw []byte) string{
+  compressed := deflate(raw)
+  return base64_encode(compressed);
 }
 
 func deflate(input []byte) []byte {
   var b bytes.Buffer
-  w, _ := flate.NewWriter(&b, flate.BestCompression)
+  w,_ := zlib.NewWriterLevel(&b, zlib.BestCompression)
   w.Write(input)
   w.Close()
   return b.Bytes()
 }
 
-func encode64(input []byte) string {
-
-  var part []byte
+func base64_encode(input []byte) string {
   var buffer bytes.Buffer
-
   inputLength := len(input)
+  for i := 0; i < 3 - inputLength % 3; i++ {
+    input = append(input, byte(0))
+  }
 
   for i := 0; i < inputLength; i += 3 {
-    if i+2 == inputLength {
-      part = to4Bytes(input[i], input[i+1], 0)
-    } else if i+1 == inputLength {
-      part = to4Bytes(input[i], 0, 0)
-    } else {
-      part = to4Bytes(input[i], input[i+1], input[i+2])
-    }
-    buffer.Write(part);
-  }
+    b1, b2, b3, b4 := input[i], input[i+1], input[i+2], byte(0)
 
+    b4 = b3 & 0x3f
+    b3 = ((b2 & 0xf) << 2) | (b3 >> 6)
+    b2 = ((b1 & 0x3) << 4) | (b2 >> 4)
+    b1 = b1 >> 2
+
+    for _,b := range []byte{b1,b2,b3,b4} {
+      buffer.WriteByte(byte(mapper[b]))
+    }
+  }
   return string(buffer.Bytes())
 }
-func to4Bytes(b1, b2, b3 byte) []byte {
-  c1 := b1 >> 2
-  c2 := ((b1 & 0x3) << 4) | (b2 >> 4)
-  c3 := ((b2 & 0xF) << 2) | (b3 >> 6)
-  c4 := b3 & 0x3F
-  return []byte{
-    encode6bit(c1 & 0x3F),
-    encode6bit(c2 & 0x3F),
-    encode6bit(c3 & 0x3F),
-    encode6bit(c4 & 0x3F),
-  }
-}
 
-func encode6bit(b byte) byte {
-  if b < 10 {
-    return byte(48 + b)
-  }
-  b -= 10
-  if b < 26 {
-    return byte(65 + b)
-  }
-  b -= 26
-  if b < 26 {
-    return byte(97 + b)
-  }
-  b -= 26
-  if b == 0 {
-    return ([]byte("-"))[0]
-  }
-  if b == 1 {
-    return ([]byte("_"))[0]
-  }
-  return ([]byte("?"))[0]
-}
-
-
-func parseArgs() Options{
-  flag.CommandLine.Init(os.Args[0],flag.ExitOnError)
+func parseArgs() Options {
+  flag.CommandLine.Init(os.Args[0], flag.ExitOnError)
   server := flag.String("s", "http://plantuml.com/plantuml", "Plantuml `server` address. Used when generating link or extracting output")
   format := flag.String("f", "png", "Output `format` type. (Options: png,txt,svg)")
   style := flag.String("o", "text", "Indicates if `output` style. (Options: text, link, output)")
   help := flag.Bool("h", false, "Show help (this) text")
   flag.Parse()
-  files := flag.Args()
-
+  fileList := flag.Args()
+  files := []string{}
+  if len(fileList) > 0 {
+  fileMap := make(map[string]int)
+  for _, f := range fileList {
+    abs, err := filepath.Abs(f)
+    if (err != nil) {
+      fmt.Errorf("%s: Unable to resolve filename\n", f)
+    }
+    _, ok := fileMap[abs]
+    if !ok {
+      files = append(files, abs)
+      fileMap[abs] = 1
+    }
+  }
+}
   var inputStream []byte
-
   stat, _ := os.Stdin.Stat()
   if (stat.Mode() & os.ModeCharDevice) == 0 {
     data,err := ioutil.ReadAll(os.Stdin)
@@ -160,6 +139,9 @@ func parseArgs() Options{
       inputStream = data
     }
   }
+
+
+
   if *help || len(files) == 0 && len(inputStream) == 0  {
     fmt.Printf(`USAGE:
     plantuml-go [OPTIONS] files
