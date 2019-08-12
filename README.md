@@ -15,7 +15,7 @@ This project provides a handy CLI for PlantUML users.
 Get go package first.
 
 ```shell
-go get http://github.com/yogendra/plantuml-go
+go get github.com/yogendra/plantuml-go
 ```
 _I am too new to Go and I could be wrong_ 
 
