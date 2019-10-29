@@ -12,12 +12,11 @@ This project provides a handy CLI for PlantUML users.
 
 ## How to use?
 
-Get go package first.
+Get the go package first.
 
 ```shell
-go get http://github.com/yogendra/plantuml-go
+go get github.com/yogendra/plantuml-go
 ```
-_I am too new to Go and I could be wrong_ 
 
 Now, run `plantuml-go`
 
@@ -35,15 +34,15 @@ a -> b : hello world
 
 ### How to generate images?
 
-User `-f png -o output` options on command line
+Use `-f png -o output` options on command line
 
 ```shell 
 plantuml-go -f png -o output my-uml.puml
 ```
 
-Above command will create a `my-uml.png` file next to `my-uml.puml` file (same director).
+Above command will create a `my-uml.png` file next to `my-uml.puml` file (same directory).
  
-##ToDo
+## ToDo
 * CD/CI
 * Release
 * Improve Test Coverage
