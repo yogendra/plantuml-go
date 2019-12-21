@@ -9,7 +9,9 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -49,9 +51,21 @@ func process(options *options, textFormat string, filename string) {
 	if options.Style == styleTxt {
 		fmt.Printf("%s\n", textFormat)
 	} else if options.Style == styleLink {
-		fmt.Printf("%s/%s/%s\n", options.Server, options.Format, textFormat)
+		u, err := url.Parse(options.Server)
+		if err != nil {
+			fmt.Println("failed to parse the url:", options.Server)
+			return
+		}
+		u.Path = path.Join(u.Path, options.Format, textFormat)
+		fmt.Println(u.String())
 	} else if options.Style == styleOutput {
-		link := fmt.Sprintf("%s/%s/%s", options.Server, options.Format, textFormat)
+		u, err := url.Parse(options.Server)
+		if err != nil {
+			fmt.Println("failed to parse the url:", options.Server)
+			return
+		}
+		u.Path = path.Join(u.Path, options.Format, textFormat)
+		link := u.String()
 		output := os.Stdout
 
 		if filename != "" {
