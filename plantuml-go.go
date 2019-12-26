@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,83 +15,16 @@ import (
 )
 
 const (
-	formatTxt   = "txt"
-	formatPng   = "png"
-	formatSvg   = "svg"
 	styleTxt    = "text"
 	styleLink   = "link"
 	styleOutput = "output"
 	mapper      = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
 )
 
-func main() {
-	opts, err := parseArgs()
-	if err != nil {
-		log.Println("failed to parse args:", err)
-		return
-	}
-
-	if opts.InputStream != nil {
-		process(&opts, encodeAsTextFormat(opts.InputStream), "")
-	} else {
-		for _, filename := range opts.FileNames {
-			data, err := ioutil.ReadFile(filename)
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
-			process(&opts, encodeAsTextFormat(data), filename)
-		}
-	}
-}
-
-func process(options *options, textFormat string, filename string) {
-	if options.Style == styleTxt {
-		fmt.Printf("%s\n", textFormat)
-	} else if options.Style == styleLink {
-		u, err := url.Parse(options.Server)
-		if err != nil {
-			fmt.Println("failed to parse the url:", options.Server)
-			return
-		}
-		u.Path = path.Join(u.Path, options.Format, textFormat)
-		fmt.Println(u.String())
-	} else if options.Style == styleOutput {
-		u, err := url.Parse(options.Server)
-		if err != nil {
-			fmt.Println("failed to parse the url:", options.Server)
-			return
-		}
-		u.Path = path.Join(u.Path, options.Format, textFormat)
-		link := u.String()
-		output := os.Stdout
-
-		if filename != "" {
-			outputFilename := strings.TrimSuffix(filename, filepath.Ext(filename))
-			outputFilename = fmt.Sprintf("%s.%s", outputFilename, options.Format)
-			output, _ = os.OpenFile(outputFilename, os.O_RDWR|os.O_CREATE, 0666)
-		}
-		response, err := http.Get(link)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		if response.StatusCode != 200 {
-			fmt.Printf("Error in Fetching: %s\n%s\n", link, response.Status)
-			return
-		}
-
-		io.Copy(output, response.Body)
-		output.Close()
-	}
-}
-
-type options struct {
-	Server      string
-	Format      string
-	Style       string
-	InputStream []byte
-	FileNames   []string
+type option struct {
+	server string
+	format string
+	style  string
 }
 
 func encodeAsTextFormat(raw []byte) string {
@@ -131,50 +62,79 @@ func base64Encode(input []byte) string {
 	return string(buffer.Bytes())
 }
 
-func parseArgs() (options, error) {
-	flag.CommandLine.Init(os.Args[0], flag.ExitOnError)
-	server := flag.String("s", "http://plantuml.com/plantuml", "Plantuml `server` address. Used when generating link or extracting output")
-	format := flag.String("f", "png", "Output `format` type. (Options: png,txt,svg)")
-	style := flag.String("o", "text", "Indicates if `output` style. (Options: text, link, output)")
-	help := flag.Bool("h", false, "Show help (this) text")
-	flag.Parse()
-
-	fileList := flag.Args()
-	files := []string{}
-	if len(fileList) > 0 {
-		fileMap := make(map[string]int)
-		for _, f := range fileList {
-			abs, err := filepath.Abs(f)
-			if err != nil {
-				return options{}, fmt.Errorf("%s: unable to resolve filename", f)
-			}
-			_, ok := fileMap[abs]
-			if !ok {
-				files = append(files, abs)
-				fileMap[abs] = 1
-			}
-		}
+// getImage from the PlantUML Server with the url and writes the
+// image data to the w writer.
+func getImage(url string, w io.Writer) error {
+	res, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to get image from %s:%s", url, err)
 	}
-	var inputStream []byte
-	stat, _ := os.Stdin.Stat()
-	if (stat.Mode() & os.ModeCharDevice) == 0 {
-		data, err := ioutil.ReadAll(os.Stdin)
-		if err == nil {
-			inputStream = data
-		}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch because the status code was %v", res.StatusCode)
 	}
 
-	if *help || len(files) == 0 && len(inputStream) == 0 {
-		fmt.Printf(`USAGE:
-    plantuml-go [OPTIONS] files
-        Reads and process files based on options
-    plantuml-go [OPTIONS]
-        Reads and process stdin. NOTE: Ouput will be on stdout
-OPTIONS
-`)
-		flag.PrintDefaults()
-		os.Exit(1)
+	_, err = io.Copy(w, res.Body)
+	if err != nil {
+		return fmt.Errorf("failed to copy the image to the writer:%s", err)
 	}
-	opts := options{*server, *format, *style, inputStream, files}
-	return opts, nil
+
+	return nil
+}
+
+func getImageWithFileList(opt option, list []string) error {
+	var e error
+	for _, f := range list {
+		abs, err := filepath.Abs(f)
+		if err != nil {
+			e = fmt.Errorf("%s: failed to get the absolute file path: %s", e, f)
+		}
+		out := strings.TrimSuffix(abs, filepath.Ext(abs))
+		out = fmt.Sprintf("%s.%s", out, opt.format)
+
+		output, err := os.OpenFile(out, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			e = fmt.Errorf("%s: failed to open the file: %s", e, err)
+		}
+		defer output.Close()
+
+		data, err := ioutil.ReadFile(abs)
+		if err != nil {
+			e = fmt.Errorf("%s: failed to read the file: %s", e, err)
+		}
+
+		err = getImageWithOneStream(opt, data, output)
+		if err != nil {
+			e = fmt.Errorf("%s: %s", e, err)
+		}
+	}
+
+	return e
+}
+
+func getImageWithOneStream(opt option, data []byte, w io.Writer) error {
+	encorded := encodeAsTextFormat(data)
+
+	u, err := url.Parse(opt.server)
+	if err != nil {
+		fmt.Printf("failed to parse the url '%s': %s\n", opt.server, err)
+	}
+	u.Path = path.Join(u.Path, opt.format, encorded)
+	link := u.String()
+
+	switch opt.style {
+	case styleTxt:
+		fmt.Println(encorded)
+	case styleLink:
+		fmt.Println(link)
+	case styleOutput:
+		err := getImage(link, w)
+		if err != nil {
+			return fmt.Errorf("failed to get image from %s:%s", link, err)
+		}
+	default:
+		return fmt.Errorf("style '%s' is invalid", opt.style)
+	}
+	return nil
 }
